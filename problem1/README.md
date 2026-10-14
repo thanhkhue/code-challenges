@@ -52,8 +52,8 @@ problem1/
 
 ## Implementations
 
-| Implementation | Approach | Time | Space | 
-|---|---|---|---|---|
+| Implementation | Approach | Time | Space |
+|---|---|---|---|
 | `sum_to_n_1` | Iterative loop | O(n) | O(1) |
 | `sum_to_n_2` | Recursion | O(n) | O(n) call stack|
 | `sum_to_n_3` | Gauss formula `n(n+1)/2` | O(1) | O(1) |
