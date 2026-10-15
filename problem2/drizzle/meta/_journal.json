@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792051386014,
+      "tag": "0000_initial_schema.sql",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792052110543,
+      "tag": "0001_add_soft_delete.sql",
+      "breakpoints": true
+    }
+  ]
+}
