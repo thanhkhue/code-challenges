@@ -102,12 +102,10 @@ sequenceDiagram
         API->>API: Rate limit check
         API->>DB: SELECT score_value FROM action_definitions WHERE action_id = ?
         API->>API: validateAction(userId, actionId)
-        API->>R: Capture minTop10Score + wasAlreadyInTop10 BEFORE ZADD
+        API->>R: Pipeline - ZREVRANK + ZREVRANGE (capture pre-update state)
         API->>DB: Atomic transaction - insert score_events and update user_scores
-        API->>R: ZADD leaderboard:global newScore userId
-        alt newScore >= minTop10Score OR wasAlreadyInTop10
-            API->>R: INCR leaderboard:version → 1025
-            API->>R: XADD leaderboard:stream 1025-0 data {top10-json}
+        API->>R: Lua script - ZADD + ZREVRANK + broadcast decision + INCR + ZREVRANGE + XADD
+        alt Top 10 affected
             R-->>SSE: XREAD unblocks
             SSE-->>C: event: leaderboard_update data: { version: 1025, leaderboard }
         end
@@ -253,6 +251,42 @@ Content-Type: application/json
 }
 ```
 
+**Lua Script (defined once at startup):**
+
+The broadcast block — ZADD, broadcast decision, INCR, ZREVRANGE, XADD — executes as a single atomic Lua script. This reduces 4 round trips to 1 and guarantees that no partial state is observable between the ZADD and the stream publish.
+
+```lua
+-- KEYS[1]: leaderboard:global  (ZSET)
+-- KEYS[2]: leaderboard:version (counter)
+-- KEYS[3]: leaderboard:stream  (Stream)
+-- ARGV[1]: userId
+-- ARGV[2]: newScore
+-- ARGV[3]: minTop10Score (captured before DB update)
+-- ARGV[4]: wasAlreadyInTop10 ('1' or '0')
+
+local newScore     = tonumber(ARGV[2])
+local minScore     = tonumber(ARGV[3])
+local wasInTop10   = ARGV[4] == '1'
+
+-- Update sorted set and retrieve new rank in one pass
+redis.call('ZADD', KEYS[1], newScore, ARGV[1])
+local newRank = redis.call('ZREVRANK', KEYS[1], ARGV[1])
+
+-- Broadcast only if Top 10 is affected
+local shouldBroadcast = (newScore >= minScore) or wasInTop10
+if not shouldBroadcast then
+  return {0, newRank}
+end
+
+-- Increment version and publish new Top 10 to stream
+local newVersion = redis.call('INCR', KEYS[2])
+local top10       = redis.call('ZREVRANGE', KEYS[1], 0, 9, 'WITHSCORES')
+local streamId    = tostring(newVersion) .. '-0'
+redis.call('XADD', KEYS[3], 'MAXLEN', '~', '1', streamId, 'data', cjson.encode(top10))
+
+return {newVersion, newRank}
+```
+
 **Server Logic (Score Module API):**
 
 ```typescript
@@ -292,11 +326,17 @@ async function completeAction(
   const isValid = await validateAction(userId, actionId);
   if (!isValid) throw new HttpError(422, 'Action not valid');
 
-  // 5. Capture leaderboard state BEFORE update (for broadcast decision)
-  const userRank = await redis.zrevrank('leaderboard:global', userId);
+  // 5. Pipeline: capture pre-update leaderboard state (2 round trips → 1)
+  const [userRank, currentTop10Flat] = await redis.pipeline([
+    ['zrevrank', 'leaderboard:global', userId],
+    ['zrevrange', 'leaderboard:global', '0', '9', 'WITHSCORES'],
+  ]).exec() as [number | null, string[]];
+
   const wasAlreadyInTop10 = userRank !== null && userRank < 10;
-  const currentTop10 = await redis.zrevrangeWithScores('leaderboard:global', 0, 9);
-  const minTop10Score = currentTop10.length === 10 ? currentTop10[9].score : 0;
+  // ZREVRANGE WITHSCORES returns flat [member, score, member, score, ...]
+  const minTop10Score = currentTop10Flat.length === 20
+    ? parseFloat(currentTop10Flat[19])
+    : 0;
 
   // 6. Atomic DB update
   const newScore = await db.transaction(async (trx) => {
@@ -318,35 +358,39 @@ async function completeAction(
     return row!.score;
   });
 
-  // 7. Update Redis ZSET
-  await redis.zadd('leaderboard:global', newScore, userId);
+  // 7. Lua script: ZADD + broadcast decision + INCR + ZREVRANGE + XADD (4 round trips → 1)
+  // Returns [newVersion, newRank] — newVersion is 0 if Top 10 was not affected.
+  const [newVersion, newRankIndex] = await redis.eval(
+    broadcastLuaScript,
+    ['leaderboard:global', 'leaderboard:version', 'leaderboard:stream'],
+    [userId, String(newScore), String(minTop10Score), wasAlreadyInTop10 ? '1' : '0']
+  ) as [number, number];
 
-  // 8. Broadcast if Top 10 is affected
-  // This check is eventually consistent — rare false/missed broadcasts
-  // within concurrent requests are acceptable for a leaderboard.
-  const shouldBroadcast = newScore >= minTop10Score || wasAlreadyInTop10;
-  let newVersion: number | null = null;
-
-  if (shouldBroadcast) {
-    newVersion = await redis.incr('leaderboard:version');
-    const top10 = await redis.zrevrangeWithScores('leaderboard:global', 0, 9);
-    await redis.xadd(
-      'leaderboard:stream',
-      `${newVersion}-0`,
-      { data: JSON.stringify(top10) },
-      { maxlen: 1 }
-    );
-  }
-
-  // 9. Cache idempotency response (24h TTL)
-  const currentVersion = newVersion ?? Number(await redis.get('leaderboard:version') ?? 0);
-  const newRank = (await redis.zrevrank('leaderboard:global', userId))! + 1;
-  const response: CompleteActionResponse = { userId, newScore, rank: newRank, version: currentVersion };
+  // 8. Cache idempotency response (24h TTL)
+  const currentVersion = newVersion > 0
+    ? newVersion
+    : Number(await redis.get('leaderboard:version') ?? 0);
+  const response: CompleteActionResponse = {
+    userId,
+    newScore,
+    rank: newRankIndex + 1,   // Redis rank is 0-indexed
+    version: currentVersion,
+  };
   await redis.setex(`idempotency:${idempotencyKey}`, 86400, JSON.stringify(response));
 
   return response;
 }
 ```
+
+**Redis round trips: 8 → 4**
+
+| Step | Before | After |
+|---|---|---|
+| Idempotency check | 1 (GET) | 1 (GET) |
+| Pre-update capture | 2 (ZREVRANK + ZREVRANGE) | 1 (Pipeline) |
+| Post-DB Redis update + broadcast | 4 (ZADD + INCR + ZREVRANGE + XADD) | 1 (Lua script) |
+| Cache idempotency | 1 (SETEX) | 1 (SETEX) |
+| **Total** | **8** | **4** |
 
 **Response `200 OK`:**
 ```json
@@ -605,7 +649,55 @@ For the Redis path, fetch via `ZREVRANGE` and sort tied entries in-memory by `up
 
 ---
 
-## 9. Future Improvements
+## 9. Additional Comments
+
+### 9.1 Action Cooldown Enforcement
+
+The `action_definitions` table includes a `cooldown_ms` column but the implementation does not show how it is enforced. For each `(userId, actionId)` pair, the last submission timestamp should be stored in Redis:
+
+```
+Key: cooldown:{userId}:{actionId}
+TTL: cooldown_ms
+```
+
+Before applying the score, check if the key exists. If present, reject with `429`. If absent, set it with the configured TTL. This prevents a user from repeatedly submitting the same action faster than the cooldown allows, independently of the global rate limit.
+
+### 9.2 Redis Cluster Considerations
+
+The current design uses a single Redis instance. At higher scale, Redis Cluster distributes keys across shards by hash slot. However, Lua scripts and pipelines that touch multiple keys only work correctly if all keys are on the same shard.
+
+To ensure the Lua script keys (`leaderboard:global`, `leaderboard:version`, `leaderboard:stream`) always land on the same shard, use Redis hash tags:
+
+```
+{leaderboard}:global
+{leaderboard}:version
+{leaderboard}:stream
+```
+
+Keys sharing the same `{tag}` are guaranteed to hash to the same slot. This is a one-line change but must be planned before the first deployment — renaming keys in production requires a migration.
+
+### 9.3 Backpressure on SSE Fan-out
+
+The chunked fan-out (`broadcast`) yields the event loop every 500 clients. If a second broadcast arrives while the first fan-out is still in progress, both will run concurrently and interleave. For most leaderboard workloads this is acceptable — clients receive both updates and the later one wins.
+
+If strict ordering is required, a simple in-process queue (e.g. `async-queue`) can serialize fan-outs:
+
+```typescript
+const broadcastQueue = new AsyncQueue();
+broadcastQueue.push(() => fanOut(payload));
+```
+
+Clients always see a consistent final state regardless, since each payload contains the full Top 10.
+
+### 9.4 Score Integrity Under DB–Redis Drift
+
+The background reconciler re-syncs Redis from Postgres every 10 seconds, covering the window where a DB write succeeds but the corresponding Redis ZADD fails. However, the reconciler must read from the DB replica (not primary) to avoid adding read load to the write path.
+
+If the reconciler is down for an extended period and Redis is also down, the fallback `GET /leaderboard` query serves directly from Postgres. Ensure the `user_scores` table has appropriate read replicas and that the fallback query uses the replica connection pool.
+
+---
+
+## 11. Future Improvements
 
 - **Diff broadcast:** Instead of the full Top-10 on every event, send `{ added, removed, changed }` to reduce payload size.
 - **Personalized leaderboard:** `GET /leaderboard/me` returns the requesting user's rank plus 2 neighbors above and below.
@@ -615,12 +707,13 @@ For the Redis path, fetch via `ZREVRANGE` and sort tied entries in-memory by `up
 
 ---
 
-## 10. Implementation Checklist
+## 12. Implementation Checklist
 
 **Score Module API**
 - [ ] Seed `action_definitions` table; implement admin endpoint to create/update actions
 - [ ] Implement `validateAction` interface contract; coordinate with game/business logic team on implementation
 - [ ] Implement `POST /actions/complete` with idempotency middleware and rate limiter
+- [ ] Load Lua broadcast script at startup using `SCRIPT LOAD`; call via `EVALSHA` in production
 - [ ] Implement `GET /leaderboard` with Redis read + Postgres fallback
 - [ ] Set up background reconciler: sync `user_scores` → Redis ZSET every 10 seconds
 - [ ] Add Prometheus metrics: `score_submit_total`, `score_submit_rejected_total{reason}`, `leaderboard_broadcast_latency_seconds`
