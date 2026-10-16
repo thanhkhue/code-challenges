@@ -120,24 +120,23 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A[POST /actions/complete] --> B{Idempotency key seen?}
+    A["POST /actions/complete"] --> B{Idempotency key seen?}
     B -- Yes --> C[Return cached response]
     B -- No --> D{Rate limit OK?}
     D -- No --> E[429 Too Many Requests]
-    D -- Yes --> F{actionId exists in action_definitions?}
+    D -- Yes --> F{actionId in action_definitions?}
     F -- No --> G[422 Unprocessable Entity]
-    F -- Yes --> H[validateAction userId + actionId]
-    H -- Invalid --> G
-    H -- Valid --> I[Capture minTop10Score + wasAlreadyInTop10 from Redis]
-    I --> J[DB transaction: INSERT score_events + UPDATE user_scores]
-    J --> K[ZADD leaderboard:global newScore userId]
-    K --> L{newScore >= minTop10Score\nOR wasAlreadyInTop10?}
-    L -- No --> M[Return 200, no broadcast]
-    L -- Yes --> N[INCR leaderboard:version]
-    N --> O[XADD leaderboard:stream version-0 data top10]
-    O --> P[SSE Gateway picks up via XREAD]
-    P --> Q[Fan out to all connected browsers]
-    Q --> M
+    F -- Yes --> H{validateAction passes?}
+    H -- No --> G
+    H -- Yes --> I[Capture current Top 10 state from Redis]
+    I --> J[Atomic DB transaction]
+    J --> K[Update Redis ZSET with new score]
+    K --> L{Top 10 affected?}
+    L -- No --> M[Return 200]
+    L -- Yes --> N[Increment leaderboard version]
+    N --> O[Publish new Top 10 to leaderboard stream]
+    O --> P[SSE Gateway fans out to all browsers]
+    P --> M
 ```
 
 > **Broadcast condition:** A user already in the Top 10 who gains more points changes the ordering — this must broadcast even if their new score does not exceed the current 10th-place threshold. Both conditions are evaluated before the ZADD.
@@ -205,9 +204,40 @@ Authorization: Bearer <user_jwt>
 
 The JWT is issued by the existing Auth service. This module validates it but does not issue tokens.
 
+### 4.2 Response Envelope
+
+All success and error responses use `application/json` with a consistent shape.
+
+**Success:**
+```typescript
+interface SuccessResponse<T> {
+  data: T;
+}
+```
+
+**Error:**
+```typescript
+interface ErrorResponse {
+  error: {
+    code: string;    // machine-readable constant, e.g. "RATE_LIMITED"
+    message: string; // human-readable description
+  };
+}
+```
+
+**Example error body:**
+```json
+{
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Score submit limit exceeded. Try again in 60 seconds."
+  }
+}
+```
+
 ---
 
-### 4.2 `POST /api/v1/actions/complete`
+### 4.3 `POST /api/v1/actions/complete`
 
 Submit a completed action. The server derives the score delta from `action_definitions` — no score value is accepted from the client.
 
@@ -321,38 +351,52 @@ async function completeAction(
 **Response `200 OK`:**
 ```json
 {
-  "userId": "b3d1e2f4-...",
-  "newScore": 1540,
-  "rank": 3,
-  "version": 1025
+  "data": {
+    "userId": "b3d1e2f4-...",
+    "newScore": 1540,
+    "rank": 3,
+    "version": 1025
+  }
 }
 ```
 
+> A duplicate request (same `X-Idempotency-Key`) also returns `200` with the original cached response — no score is re-applied.
+
 **Error responses:**
 
-| Code | Reason |
-|---|---|
-| `400` | Missing `X-Idempotency-Key` or malformed body |
-| `401` | Invalid or expired JWT |
-| `422` | Unknown `actionId` or failed action validation |
-| `429` | Rate limit exceeded |
+| Code | `error.code` | Reason |
+|---|---|---|
+| `400` | `MISSING_IDEMPOTENCY_KEY` | `X-Idempotency-Key` header is absent |
+| `400` | `INVALID_REQUEST_BODY` | Body is malformed or `actionId` field is missing |
+| `401` | `UNAUTHORIZED` | JWT is missing, invalid, or expired |
+| `422` | `UNKNOWN_ACTION_ID` | `actionId` does not exist in `action_definitions` |
+| `422` | `ACTION_VALIDATION_FAILED` | `validateAction` returned false |
+| `429` | `RATE_LIMITED` | Per-user or global rate limit exceeded |
 
 ---
 
-### 4.3 `GET /api/v1/leaderboard`
+### 4.4 `GET /api/v1/leaderboard`
 
 Returns the current Top 10 and the current `version`. Must be called before opening the SSE stream to obtain the initial snapshot and cursor.
 
 **Response `200 OK`:**
 ```json
 {
-  "version": 1024,
-  "leaderboard": [
-    { "rank": 1, "userId": "uuid-1", "username": "Alice", "score": 5200 },
-    { "rank": 2, "userId": "uuid-2", "username": "Bob",   "score": 4800 }
-  ]
+  "data": {
+    "version": 1024,
+    "leaderboard": [
+      { "rank": 1, "userId": "uuid-1", "username": "Alice", "score": 5200 },
+      { "rank": 2, "userId": "uuid-2", "username": "Bob",   "score": 4800 }
+    ]
+  }
 }
 ```
+
+**Error responses:**
+
+| Code | `error.code` | Reason |
+|---|---|---|
+| `401` | `UNAUTHORIZED` | JWT is missing, invalid, or expired |
 
 **Implementation:** Read from `ZREVRANGE leaderboard:global 0 9 WITHSCORES`. Cache with `Cache-Control: public, max-age=1`.
 
@@ -366,7 +410,7 @@ LIMIT 10;
 
 ---
 
-### 4.4 `GET /api/v1/leaderboard/stream?sinceVersion=<n>`
+### 4.5 `GET /api/v1/leaderboard/stream?sinceVersion=<n>`
 
 SSE endpoint served by the SSE Gateway. The client connects after receiving `version` from `GET /leaderboard`, passing it as `sinceVersion`. The gateway resumes from that cursor and holds the connection open for live pushes.
 
@@ -441,6 +485,15 @@ data: {"version":1025,"leaderboard":[{"rank":1,"userId":"...","score":5200},...]
 event: heartbeat
 data: {}
 ```
+
+**Error responses:**
+
+SSE errors are returned as standard HTTP responses before the stream is established.
+
+| Code | `error.code` | Reason |
+|---|---|---|
+| `400` | `INVALID_SINCE_VERSION` | `sinceVersion` is missing or not a valid integer |
+| `401` | `UNAUTHORIZED` | JWT is missing, invalid, or expired |
 
 **Client reconnect:** `EventSource` reconnects automatically. On reconnect the client calls `GET /leaderboard` first to obtain the current snapshot and version, then re-opens the SSE stream with that version.
 
