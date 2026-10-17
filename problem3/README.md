@@ -161,20 +161,22 @@ XREAD BLOCK 15000 STREAMS leaderboard:stream 1024-0
 
 **Why Redis Streams over Pub/Sub?** Pub/Sub drops messages if the SSE Gateway restarts between a write and a read. Streams persist the entry, covering the narrow race window between a client's `GET /leaderboard` call and its SSE subscribe.
 
-**Stream trimming:** `MAXLEN 1` — only the latest broadcast is retained. **This is an explicit design assumption: clients always see the current Top 10, not a history of every change. If multiple score updates occur while the SSE Gateway is fanning out, intermediate states are intentionally discarded — only the latest leaderboard snapshot is delivered.** This is correct behaviour for a live scoreboard display.
+**Stream trimming:** `MAXLEN 1` — only the latest broadcast is retained. **This is an explicit design assumption: clients always see the current Top 10, not a history of every change. If multiple score updates occur while the SSE Gateway is fanning out, intermediate states are intentionally discarded — only the latest leaderboard snapshot is delivered.**
 
 **Version recovery:** If the SSE Gateway loses its cursor (process restart), it calls `GET /leaderboard` to obtain the current version and snapshot, then resumes the stream from that point. The REST endpoint is the universal recovery path.
 
 ### 3.2 Action Validation
 
-The Score Module exposes a `validateAction` interface that the game/business logic layer implements. The Score Module calls it before applying any score — if it returns `false`, the request is rejected with `422`.
+`validateAction` is a function inside the Score Module whose body is left for the team owning the game/business rules to implement. The Score Module calls it before applying any score — if it returns `false`, the request is rejected with `422`.
 
 ```typescript
-// Interface for the game/business logic layer to implement
-async function validateAction(userId: string, actionId: string): Promise<boolean>;
+// Implemented by the team owning game/business rules
+async function validateAction(userId: string, actionId: string): Promise<boolean> {
+  // e.g. check game state, session validity, action eligibility
+}
 ```
 
-This keeps the Score Module decoupled from game-specific rules. The implementation is provided by the owning team.
+This keeps the score submission flow decoupled from game-specific logic. The problem statement explicitly says the action itself is out of scope, so this function is a placeholder until those rules are defined.
 
 ### 3.3 Real-Time Transport: SSE
 
