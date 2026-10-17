@@ -204,6 +204,8 @@ Authorization: Bearer <user_jwt>
 
 The JWT is issued by the existing Auth service. This module validates it but does not issue tokens.
 
+> **Note:** In a production setup, JWT verification and rate limiting are typically handled by an **API Gateway** sitting in front of all internal services. The gateway verifies the token, extracts the user identity, and passes it downstream as a trusted internal header (e.g. `X-User-Id`). It also enforces global rate limits, SSL termination, and request logging — so internal services can focus purely on business logic without holding any secret keys. The per-service auth and rate limiting described in this spec is a simplification suitable for early-stage or single-service deployments.
+
 ### 4.2 Response Envelope
 
 All success and error responses use `application/json` with a consistent shape.
