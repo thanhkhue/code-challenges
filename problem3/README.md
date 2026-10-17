@@ -161,7 +161,7 @@ XREAD BLOCK 15000 STREAMS leaderboard:stream 1024-0
 
 **Why Redis Streams over Pub/Sub?** Pub/Sub drops messages if the SSE Gateway restarts between a write and a read. Streams persist the entry, covering the narrow race window between a client's `GET /leaderboard` call and its SSE subscribe.
 
-**Stream trimming:** `MAXLEN 1` — only the latest broadcast is retained. The leaderboard is a current-state display; clients that miss intermediate updates need the latest snapshot, not a history of every change.
+**Stream trimming:** `MAXLEN 1` — only the latest broadcast is retained. **This is an explicit design assumption: clients always see the current Top 10, not a history of every change. If multiple score updates occur while the SSE Gateway is fanning out, intermediate states are intentionally discarded — only the latest leaderboard snapshot is delivered.** This is correct behaviour for a live scoreboard display.
 
 **Version recovery:** If the SSE Gateway loses its cursor (process restart), it calls `GET /leaderboard` to obtain the current version and snapshot, then resumes the stream from that point. The REST endpoint is the universal recovery path.
 
