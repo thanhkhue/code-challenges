@@ -15,6 +15,13 @@
       "when": 1792052110543,
       "tag": "0001_add_soft_delete",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792336177620,
+      "tag": "0002_tired_bloodaxe",
+      "breakpoints": true
     }
   ]
 }

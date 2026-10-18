@@ -18,6 +18,7 @@ export const games = sqliteTable('games', {
   index('idx_games_provider').on(t.provider),
   index('idx_games_genre').on(t.genre),
   index('idx_games_status').on(t.status),
+  index('idx_games_rtp').on(t.rtp),
 ]);
 
 export const operators = sqliteTable('operators', {
@@ -52,4 +53,5 @@ export const licenses = sqliteTable('licenses', {
   index('idx_licenses_game_id').on(t.game_id),
   index('idx_licenses_operator_id').on(t.operator_id),
   index('idx_licenses_status').on(t.status),
+  index('idx_licenses_start_date').on(t.start_date),
 ]);
