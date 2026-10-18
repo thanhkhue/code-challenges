@@ -1,7 +1,22 @@
-import { eq, and, sql, count, desc, getTableColumns, isNull, SQL } from 'drizzle-orm';
+import { eq, and, sql, count, asc, desc, getTableColumns, isNull, SQL } from 'drizzle-orm';
 import { db } from '../db/database';
 import { licenses, games, operators } from '../db/schema';
 import { LicenseWithRelations, CreateLicenseDTO, UpdateLicenseDTO, LicenseFilters, Pagination } from '../types';
+
+const SORT_COLUMNS = {
+  start_date:        licenses.start_date,
+  expiry_date:       licenses.expiry_date,
+  revenue_share_pct: licenses.revenue_share_pct,
+  created_at:        licenses.created_at,
+} as const;
+
+function orderBy(sort?: string) {
+  if (!sort) return desc(licenses.created_at);
+  const [field, dir] = sort.split(':');
+  const col = SORT_COLUMNS[field as keyof typeof SORT_COLUMNS];
+  if (!col) return desc(licenses.created_at);
+  return dir === 'desc' ? desc(col) : asc(col);
+}
 
 const withRelations = {
   ...getTableColumns(licenses),
@@ -35,7 +50,7 @@ export function findAll(filters: LicenseFilters, pagination: Pagination): { rows
 
   const [{ total }] = db.select({ total: count() }).from(licenses).where(where).all();
   const rows = baseQuery().where(where)
-    .orderBy(desc(licenses.created_at))
+    .orderBy(orderBy(filters.sort))
     .limit(pagination.limit)
     .offset(offset)
     .all() as LicenseWithRelations[];

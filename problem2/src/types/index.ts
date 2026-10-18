@@ -59,6 +59,7 @@ export interface GameFilters {
   volatility?: string;
   min_rtp?: number;
   max_rtp?: number;
+  sort?: string;
 }
 
 export interface CreateOperatorDTO {
@@ -82,6 +83,7 @@ export interface OperatorFilters {
   jurisdiction?: string;
   tier?: string;
   status?: string;
+  sort?: string;
 }
 
 export interface CreateLicenseDTO {
@@ -107,6 +109,7 @@ export interface LicenseFilters {
   operator_id?: string;
   type?: string;
   status?: string;
+  sort?: string;
 }
 
 // ─── Shared ───────────────────────────────────────────────────────────────────

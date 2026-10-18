@@ -1,7 +1,21 @@
-import { eq, like, and, sql, count, desc, isNull, SQL } from 'drizzle-orm';
+import { eq, like, and, sql, count, asc, desc, isNull, SQL } from 'drizzle-orm';
 import { db } from '../db/database';
 import { operators, licenses } from '../db/schema';
 import { Operator, CreateOperatorDTO, UpdateOperatorDTO, OperatorFilters, Pagination } from '../types';
+
+const SORT_COLUMNS = {
+  name:       operators.name,
+  created_at: operators.created_at,
+  updated_at: operators.updated_at,
+} as const;
+
+function orderBy(sort?: string) {
+  if (!sort) return desc(operators.created_at);
+  const [field, dir] = sort.split(':');
+  const col = SORT_COLUMNS[field as keyof typeof SORT_COLUMNS];
+  if (!col) return desc(operators.created_at);
+  return dir === 'desc' ? desc(col) : asc(col);
+}
 
 export function findById(id: string): Operator | undefined {
   return db.select().from(operators).where(and(eq(operators.id, id), isNull(operators.deleted_at))).get() as Operator | undefined;
@@ -21,7 +35,7 @@ export function findAll(filters: OperatorFilters, pagination: Pagination): { row
 
   const [{ total }] = db.select({ total: count() }).from(operators).where(where).all();
   const rows = db.select().from(operators).where(where)
-    .orderBy(desc(operators.created_at))
+    .orderBy(orderBy(filters.sort))
     .limit(pagination.limit)
     .offset(offset)
     .all() as Operator[];

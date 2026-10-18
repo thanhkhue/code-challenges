@@ -1,7 +1,22 @@
-import { eq, like, and, gte, lte, sql, count, desc, isNull, SQL } from 'drizzle-orm';
+import { eq, like, and, gte, lte, sql, count, asc, desc, isNull, SQL } from 'drizzle-orm';
 import { db } from '../db/database';
 import { games, licenses } from '../db/schema';
 import { Game, CreateGameDTO, UpdateGameDTO, GameFilters, Pagination } from '../types';
+
+const SORT_COLUMNS = {
+  name:       games.name,
+  rtp:        games.rtp,
+  created_at: games.created_at,
+  updated_at: games.updated_at,
+} as const;
+
+function orderBy(sort?: string) {
+  if (!sort) return desc(games.created_at);
+  const [field, dir] = sort.split(':');
+  const col = SORT_COLUMNS[field as keyof typeof SORT_COLUMNS];
+  if (!col) return desc(games.created_at);
+  return dir === 'desc' ? desc(col) : asc(col);
+}
 
 export function findById(id: string): Game | undefined {
   return db.select().from(games).where(and(eq(games.id, id), isNull(games.deleted_at))).get() as Game | undefined;
@@ -25,7 +40,7 @@ export function findAll(filters: GameFilters, pagination: Pagination): { rows: G
 
   const [{ total }] = db.select({ total: count() }).from(games).where(where).all();
   const rows = db.select().from(games).where(where)
-    .orderBy(desc(games.created_at))
+    .orderBy(orderBy(filters.sort))
     .limit(pagination.limit)
     .offset(offset)
     .all() as Game[];
