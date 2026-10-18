@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
+import { logger } from '../lib/logger';
 
 export class AppError extends Error {
   constructor(
@@ -38,6 +39,6 @@ export function errorHandler(
     return;
   }
 
-  console.error(err);
+  logger.error(err);
   res.status(500).json({ error: 'Internal server error' });
 }

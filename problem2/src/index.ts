@@ -1,12 +1,13 @@
 import { createApp } from './app';
+import { logger }    from './lib/logger';
 
 const PORT = process.env.PORT || 3000;
 const app  = createApp();
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  logger.info(`Server running on http://localhost:${PORT}`);
   if (!process.env.API_KEY) {
-    console.warn('Warning: API_KEY is not set — authentication is disabled');
+    logger.warn('API_KEY is not set — authentication is disabled');
   }
 });
 
