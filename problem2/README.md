@@ -1,13 +1,13 @@
 # Game License Marketplace API
 
-A RESTful CRUD backend for a B2B game license marketplace — where game studios license their titles to casino operators. Built with **Express**, **TypeScript**, **SQLite** (via `better-sqlite3`), and **Drizzle ORM**.
+A RESTful CRUD backend for a B2B game license marketplace — where game studios license their titles to platform operators. Built with **Express**, **TypeScript**, **SQLite** (via `better-sqlite3`), and **Drizzle ORM**.
 
 ## Domain
 
 | Entity | Description |
 |---|---|
-| **Game** | A casino game title (slots, table, live, etc.) published by a studio |
-| **Operator** | A casino operator who licenses games to run on their platform |
+| **Game** | A game title (slots, table, live, etc.) published by a studio |
+| **Operator** | A platform operator who licenses games to run on their platform |
 | **License** | A contract granting an operator the right to use a specific game |
 
 ## Prerequisites
